@@ -1,47 +1,71 @@
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-if [ "$#" -ne 1 ]; then
+#!/bin/bash
+VERSION=$1
+if [ -z "$VERSION" ]; then
+    echo "Error: Version argument is required"
     echo "Usage: $0 <version>"
     exit 1
 fi
-
-VERSION="$1"
-
-declare -A patterns=(
-    ["snforge_std = { git = \"https://github.com/foundry-rs/starknet-foundry.git\", tag = \"<<version>>\" }"]="snforge_std = { git = \"https://github.com/foundry-rs/starknet-foundry.git\", tag = \"v${VERSION}\" }"
-    ["snforge_std = <<version>>"]="snforge_std = \"${VERSION}\""
-    ["sncast_std = { git = \"https://github.com/foundry-rs/starknet-foundry.git\", tag = \"<<version>>\" }"]="sncast_std = { git = \"https://github.com/foundry-rs/starknet-foundry.git\", tag = \"v${VERSION}\" }"
-    ["sncast_std = <<version>>"]="sncast_std = \"${VERSION}\""
+sed -i.bak "s/## \[Unreleased\]/## \[Unreleased\]\n\n## \[${VERSION}\] - $(TZ=Europe/Krakow date '+%Y-%m-%d')/" CHANGELOG.md
+rm CHANGELOG.md.bak 2> /dev/null
+sed -i.bak "/\[workspace.package\]/,/version =/ s/version = \".*/version = \"${VERSION}\"/" Cargo.toml
+rm Cargo.toml.bak 2> /dev/null
+declare -a scarb_files=(
+    "sncast_std/Scarb.toml"
+    "snforge_std/Scarb.toml"
+    "crates/snforge-scarb-plugin/Scarb.toml"
+)
+for file in "${scarb_files[@]}"; do
+    sed -i.bak "/\[package\]/,/version =/ s/version = \".*/version = \"${VERSION}\"/" "$file"
+    rm "${file}.bak" 2> /dev/null
+done
+scarb --manifest-path sncast_std/Scarb.toml build
+scarb --manifest-path snforge_std/Scarb.toml build
+cargo update -p forge
+cargo update -p sncast
+declare -a doc_files=(
+    "./docs/src/getting-started/first-steps.md"
+    "./docs/src/starknet/script.md"
+    "./docs/src/appendix/scarb-toml.md"
+    "./docs/src/appendix/cheatcodes.md"
+    "./docs/src/appendix/snforge-library.md"
+    "./docs/src/testing/contracts.md"
+    "./docs/src/testing/using-cheatcodes.md"
 )
 
-doc_files=$(find ./docs -name "*.md")
-
-for file in $doc_files; do
-    echo "Processing $file..."
-    
-    temp_file=$(mktemp)
-    
-    cp "$file" "$temp_file"
-    
-    for pattern in "${!patterns[@]}"; do
-        replacement="${patterns[$pattern]}"
-        # Escape special characters in pattern and replacement for sed
-        escaped_pattern=$(echo "$pattern" | sed 's/[\/&]/\\&/g')
-        escaped_replacement=$(echo "$replacement" | sed 's/[\/&]/\\&/g')
-        
-        sed -i '' "s/$escaped_pattern/$escaped_replacement/g" "$temp_file"
-
-    done
-    
-    if ! cmp -s "$file" "$temp_file"; then
-        mv "$temp_file" "$file"
-        echo "Updated $file"
-    else
-        rm "$temp_file"
-        echo "No changes needed in $file"
-    fi
+for file in "${doc_files[@]}"; do
+    # Use different sed patterns based on the file
+    case "$file" in
+        "./docs/src/appendix/scarb-toml.md")
+        # Specifically target snforge_std and sncast_std versions
+            sed -i.bak -E '
+                /snforge_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/;
+                /sncast_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/
+            ' "$file"
+            ;;
+        "./docs/src/getting-started/first-steps.md")
+            # Target lines containing snforge_std or sncast_std version specifications
+            sed -i.bak -E '
+                /snforge_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/;
+                /sncast_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/
+            ' "$file"
+            ;;
+        "./docs/src/starknet/script.md")
+            # Target sncast_std version specifications
+            sed -i.bak -E '/sncast_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/' "$file"
+            ;;
+        "./docs/src/testing/"*)
+            # Target snforge_std version specifications in testing docs
+            sed -i.bak -E '/snforge_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/' "$file"
+            ;;
+        *)
+            # For any other files, target both snforge_std and sncast_std
+            sed -i.bak -E '
+                /snforge_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/;
+                /sncast_std = \{/,/version = / s/(version = ")[0-9]+\.[0-9]+\.[0-9]+")/\1'"${VERSION}"'"/
+            ' "$file"
+            ;;
+    esac
+    rm "${file}.bak" 2> /dev/null || exit 1
 done
 
 echo "Version update complete!"
